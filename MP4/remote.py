@@ -50,15 +50,15 @@ class Node:
         self.hardware_thread = threading.Thread(target=self.hardware_monitor)
         self.input_thread = threading.Thread(target=self.input_manager)
 
+        # Initialize jobs
+        if not self.remote:
+            self.bootstrap()
+
         self.transfer_thread.start()
         self.worker_thread.start()
         self.state_thread.start()
         self.hardware_thread.start()
         self.input_thread.start()
-
-        # Initialize jobs
-        if not self.remote:
-            self.bootstrap()
 
     def bootstrap(self):
         # initialize the vector
