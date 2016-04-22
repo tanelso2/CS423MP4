@@ -20,7 +20,7 @@ class RemoteNode:
         self.throttle_lock = threading.Lock()
         self.worker_event = threading.Event()
         self.job_queue = queue.Queue()
-        self.finish_jobs = []
+        self.processed_jobs = []
         self.cpu_use = psutil.cpu_percent()
         self.remote_state = None
 
@@ -95,7 +95,7 @@ class RemoteNode:
             # Process a job
             job = self.job_queue.get()
             job.vector_add()
-            self.finish_jobs.append(job)
+            self.processed_jobs.append(job)
 
     def adaptor(self):
         self.transfer_manager_send()
@@ -127,9 +127,15 @@ class RemoteNode:
             # turn the byte stream into a list of jobs
             BUFFER_SIZE = self.transfer_socket.recv(8)
             pickled_data = self.transfer_socket.recv(int.from_bytes(BUFFER_SIZE, byteorder='big'))
-            jobs_list = pickle.loads(pickled_data)
-            for job in jobs_list:
-                self.job_queue.put(job)
+            jobs_recvd = pickle.loads(pickled_data)
+
+            # If the jobs are processed, put into finished jobs (local only)
+            if jobs_recvd[0].complete is True:
+                processed_jobs.extend(jobs_recvd)
+            else:
+                # Otherwise we are receiving jobs to process
+                for job in jobs_list:
+                    self.job_queue.put(job)
 
     def transfer_manager_send(self, data):
         pickled_data = pickle.dumps(data)
