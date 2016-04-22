@@ -56,49 +56,39 @@ class RemoteNode:
         if not remote:
             self.bootstrap()
 
-
     def bootstrap(self):
         # initialize the vector
         A = [1.111111] * TOTAL_ELEMENTS
-        list_of_jobs = []
-        id_count = 0
-        start_index = 0
 
         # create jobs
-        for i in range(JOB_COUNT):
-            list_of_jobs.append(Job(id_count, start_index, A[start_index:(start_index + SIZE_OF_JOB)]))
-            id_count += 1
-            start_index += SIZE_OF_JOB
+        list_of_jobs = [Job(i, i * SIZE_OF_JOB, A[i * SIZE_OF_JOB : i * SIZE_OF_JOB + SIZE_OF_JOB]) for i in range(JOB_COUNT)]
 
-        half = int(JOB_COUNT / 2)
-        first_half_jobs = list_of_jobs[0:half]
-        second_half_jobs = list_of_jobs[half:JOB_COUNT]
-
-        for job in first_half_jobs:
+        for job in list_of_jobs[0 : int(JOB_COUNT / 2)]:
             self.job_queue.put(job)
 
-        self.transfer_manager_send(second_half_jobs)
+        self.transfer_manager_send(list_of_jobs[int(JOB_COUNT / 2) : JOB_COUNT])
 
     def worker_thread_manager(self):
-        while not self.worker_event.isSet():
+        while True:
+            # Throttling
+            if self.worker_event.isSet():
+                # Set timer to clear event in the time we should sleep
+                self.throttle_lock.acquire()
+                wake = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.clear())
+                self.throttle_lock.release()
+
+                # Wait for the event to wake up
+                wake.start()
+                self.worker_event.wait()
+
+                # Set timer to sleep in the time we should throttle
+                sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
+                sleep.start()
+
+            # Process a job
             job = self.job_queue.get()
             job.vector_add()
             self.finish_jobs.append(job)
-
-        self.throttle_lock.acquire()
-        timer = threading.Timer((100 - self.throttling) / 1000, self.start_worker)
-        self.throttle_lock.release()
-        timer.start()
-
-    def terminate_worker(self):
-        self.worker_event.set()
-
-    def start_worker(self):
-        self.worker_thread = threading.Thread(target=self.worker_thread_manager)
-        self.throttle_lock.acquire()
-        timer = threading.Timer(self.throttling / 1000, self.terminate_worker)
-        self.throttle_lock.release()
-        timer.start()
 
     def adaptor(self):
         self.transfer_manager_send()
@@ -133,7 +123,6 @@ class RemoteNode:
             jobs_list = pickle.loads(pickled_data)
             for job in jobs_list:
                 self.job_queue.put(job)
-                print("Received job {}".format(job.id))
 
     def transfer_manager_send(self, data):
         pickled_data = pickle.dumps(data)
