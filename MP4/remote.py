@@ -1,23 +1,20 @@
 import socket
 import pickle
 import threading
-import time
-import queue
 import psutil
+
 from state import State
 from job import Job
-
-get_current_time = lambda:int(round(time.time() * 1000))
 
 TOTAL_ELEMENTS = 1024*1024*4
 JOB_COUNT = 512
 SIZE_OF_JOB = int(TOTAL_ELEMENTS / JOB_COUNT)
 
-
-class RemoteNode:
+class Node:
     def __init__(self, remote):
+        self.remote = remote
         self.throttling = 0
-        self.job_queue = queue.Queue()
+        self.job_queue = []
         self.processed_jobs = []
         self.cpu_use = psutil.cpu_percent()
         self.remote_state = None
@@ -26,11 +23,12 @@ class RemoteNode:
         self.transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.state_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        if remote:
+        if self.remote:
             self.transfer_socket.bind(("localhost", 8040))
             self.transfer_socket.listen(1)
             self.state_socket.bind(("localhost", 8041))
             self.state_socket.listen(1)
+
             # Accept connections
             (clientsocket, address) = self.state_socket.accept()
             self.state_socket = clientsocket
@@ -42,6 +40,8 @@ class RemoteNode:
 
         # Threads
         self.throttle_lock = threading.Lock()
+        self.job_queue_lock = threading.Lock()
+        self.processed_jobs_lock = threading.Lock()
         self.worker_event = threading.Event()
 
         self.transfer_thread = threading.thread(target=self.transfer_manager)
@@ -57,7 +57,7 @@ class RemoteNode:
         self.input_thread.start()
 
         # Initialize jobs
-        if not remote:
+        if not self.remote:
             self.bootstrap()
 
     def bootstrap(self):
@@ -65,12 +65,11 @@ class RemoteNode:
         A = [1.111111] * TOTAL_ELEMENTS
 
         # create jobs
-        list_of_jobs = [Job(i, i * SIZE_OF_JOB, A[i * SIZE_OF_JOB : i * SIZE_OF_JOB + SIZE_OF_JOB]) for i in range(JOB_COUNT)]
+        all_jobs = [Job(i, i * SIZE_OF_JOB, A[i * SIZE_OF_JOB : i * SIZE_OF_JOB + SIZE_OF_JOB]) for i in range(JOB_COUNT)]
 
-        for job in list_of_jobs[0 : int(JOB_COUNT / 2)]:
-            self.job_queue.put(job)
+        self.job_queue = all_jobs[0 : int(JOB_COUNT / 2)]
 
-        self.transfer_manager_send(list_of_jobs[int(JOB_COUNT / 2) : JOB_COUNT])
+        self.transfer_manager_send(all_jobs[int(JOB_COUNT / 2) : JOB_COUNT])
 
     def worker_thread_manager(self):
         # Set the first cycle
@@ -93,16 +92,41 @@ class RemoteNode:
                 self.worker_event.wait()
 
                 # Set timer to sleep in the time we should throttle
+                self.throttle_lock.acquire()
                 sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
+                self.throttle_lock.release()
                 sleep.start()
 
             # Process a job
-            job = self.job_queue.get()
+            self.job_queue_lock.acquire()
+            job = self.job_queue.pop()
+            self.job_queue_lock.release()
+
             job.vector_add()
+
+            self.processed_jobs_lock.acquire()
             self.processed_jobs.append(job)
+            self.processed_jobs_lock.release()
 
     def adaptor(self):
-        self.transfer_manager_send()
+        # Calculate ratio of loads
+        num_jobs_to_send = self.state().num_jobs_to_send(self.remote_state)
+        if num_jobs_to_send > 0:
+            # Send some of our jobs over
+            self.job_queue_lock.acquire()
+            jobs_to_send = self.job_queue[-num_jobs_to_send :]
+            self.job_queue = self.job_queue[: len(self.job_queue) - num_jobs_to_send]
+            self.job_queue_lock.release()
+            self.transfer_manager_send(jobs_to_send)
+
+        # Send processed jobs to local over transfer manager
+        if self.remote:
+            self.processed_jobs_lock.acquire()
+            self.transfer_manager_send(self.processed_jobs)
+            self.processed_jobs = []
+            self.processed_jobs_lock.release()
+
+        # Send our state
         self.state_manager_send()
 
     def state_manager_receive(self):
@@ -112,13 +136,11 @@ class RemoteNode:
             self.remote_state = pickle.loads(pickled_data)
 
     def state_manager_send(self):
-        state = State(self.job_queue.qsize(), self.throttling, self.cpu_use)
-        pickled_data = pickle.dumps(state)
+        pickled_data = pickle.dumps(self.state())
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
         self.state_socket.send(length)
         self.state_socket.send(pickled_data)
-
 
     def hardware_monitor(self):
         self.cpu_use = psutil.cpu_percent()
@@ -134,11 +156,15 @@ class RemoteNode:
 
             # If the jobs are processed, put into finished jobs (local only)
             if jobs_recvd[0].complete is True:
-                processed_jobs.extend(jobs_recvd)
+                self.processed_jobs_lock.acquire()
+                self.processed_jobs.extend(jobs_recvd)
+                self.processed_jobs_lock.release()
             else:
                 # Otherwise we are receiving jobs to process
-                for job in jobs_list:
-                    self.job_queue.put(job)
+                for job in jobs_recvd:
+                    self.job_queue_lock.acquire()
+                    self.job_queue.append(job)
+                    self.job_queue_lock.release()
 
     def transfer_manager_send(self, data):
         pickled_data = pickle.dumps(data)
@@ -159,3 +185,9 @@ class RemoteNode:
                     self.throttle_lock.release()
             except ValueError:
                 print("Value must be an integer between 0 and 100. Try again.")
+
+    def state(self):
+        self.job_queue_lock.acquire()
+        state = State(len(self.job_queue), self.throttling, self.cpu_use)
+        self.job_queue_lock.release()
+        return state
