@@ -108,9 +108,14 @@ class Node:
             self.processed_jobs.append(job)
             self.processed_jobs_lock.release()
 
+    def num_jobs_to_send(self):
+        local_state = self.state()
+        remote_state = self.remote_state
+        return (local_state.num_jobs * local_state.throttle_value * local_state.cpu_use - remote_state.num_jobs * remote_state.throttle_value * remote_state.cpu_use) / (local_state.throttle_value * local_state.cpu_use + remote_state.throttle_value * remote_state.cpu_use)
+
     def adaptor(self):
         # Calculate ratio of loads
-        num_jobs_to_send = self.state().num_jobs_to_send(self.remote_state)
+        num_jobs_to_send = self.num_jobs_to_send()
         if num_jobs_to_send > 0:
             # Send some of our jobs over
             self.job_queue_lock.acquire()

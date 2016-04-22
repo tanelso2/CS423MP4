@@ -10,6 +10,7 @@ class Job:
             for j in range(200):
                 self.data[i] += 1.111111
         self.complete = True
+        print("Completed job {}".format(self.id))
 
     def print_id(self):
         print("My ID is {}".format(self.id))
