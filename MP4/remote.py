@@ -69,6 +69,13 @@ class RemoteNode:
         self.transfer_manager_send(list_of_jobs[int(JOB_COUNT / 2) : JOB_COUNT])
 
     def worker_thread_manager(self):
+        # Set the first cycle
+        self.throttle_lock.acquire()
+        sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
+        self.throttle_lock.release()
+        sleep.start()
+
+        # Loop to process jobs/sleep/wake
         while True:
             # Throttling
             if self.worker_event.isSet():
