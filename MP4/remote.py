@@ -17,13 +17,12 @@ SIZE_OF_JOB = int(TOTAL_ELEMENTS / JOB_COUNT)
 class RemoteNode:
     def __init__(self, remote):
         self.throttling = 0
-        self.throttle_lock = threading.Lock()
-        self.worker_event = threading.Event()
         self.job_queue = queue.Queue()
         self.processed_jobs = []
         self.cpu_use = psutil.cpu_percent()
         self.remote_state = None
 
+        # Sockets
         self.transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.state_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -41,6 +40,10 @@ class RemoteNode:
             self.state_socket.connect(("localhost", 8040))
             self.transfer_socket.connect(("localhost", 8041))
 
+        # Threads
+        self.throttle_lock = threading.Lock()
+        self.worker_event = threading.Event()
+
         self.transfer_thread = threading.thread(target=self.transfer_manager)
         self.worker_thread = threading.Thread(target=self.worker_thread_manager)
         self.state_thread = threading.Thread(target=self.state_manager)
@@ -53,6 +56,7 @@ class RemoteNode:
         self.hardware_thread.start()
         self.input_thread.start()
 
+        # Initialize jobs
         if not remote:
             self.bootstrap()
 
