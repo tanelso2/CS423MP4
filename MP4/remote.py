@@ -111,9 +111,8 @@ class RemoteNode:
             pickled_data = self.state_socket.recv(int.from_bytes(BUFFER_SIZE, byteorder='big'))
             self.remote_state = pickle.loads(pickled_data)
 
-
     def state_manager_send(self):
-        state = State( self.job_queue.qsize(), self.throttling, self.cpu_use)
+        state = State(self.job_queue.qsize(), self.throttling, self.cpu_use)
         pickled_data = pickle.dumps(state)
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
@@ -160,4 +159,3 @@ class RemoteNode:
                     self.throttle_lock.release()
             except ValueError:
                 print("Value must be an integer between 0 and 100. Try again.")
-
