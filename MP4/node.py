@@ -8,16 +8,12 @@ from sys import argv
 from state import State
 from job import Job
 
-'''
-logging.basicConfig(filename='logfile.txt', level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
-'''
-
 TOTAL_ELEMENTS = 1024 * 1024 * 4
 JOB_COUNT = 512
 SIZE_OF_JOB = int(TOTAL_ELEMENTS / JOB_COUNT)
 
-
 def recvall(sock, n):
+    # Helper function for reading whole data from socket
     data = bytes()
     while len(data) < n:
         packet = sock.recv(n - len(data))
