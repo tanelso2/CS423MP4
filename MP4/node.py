@@ -58,8 +58,8 @@ class Node:
             self.transfer_socket = clientsocket
         else:
             # we are the local server, connect to the remote server
-            self.transfer_socket.connect(("localhost", 8040))
-            self.state_socket.connect(("localhost", 8041))
+            self.transfer_socket.connect(("sp16-cs423-g06.cs.illinois.edu", 8040))
+            self.state_socket.connect(("sp16-cs423-g06.cs.illinois.edu", 8041))
 
         # Threads
         self.throttle_lock = threading.Lock()
