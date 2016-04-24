@@ -29,12 +29,12 @@ def recvall(sock, n):
 
 class Node:
     def __init__(self, remote):
+        # Set instance variables
         self.remote = remote
         self.throttling = 70
         self.job_queue = []
         self.processed_jobs = []
         self.cpu_use = 0.3
-        # self.cpu_use = psutil.cpu_percent()
         self.remote_state = None
         self.hardware_manager_started = False
 
@@ -44,6 +44,7 @@ class Node:
         self.transfer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.state_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+        # Server / client server connections
         if self.remote:
             # this is the remote server so listen for connections
             self.transfer_socket.bind(("localhost", 8040))
@@ -65,7 +66,6 @@ class Node:
         self.throttle_lock = threading.Lock()
         self.job_queue_lock = threading.Lock()
         self.processed_jobs_lock = threading.Lock()
-        self.worker_event = threading.Event()
         self.shutdown_event = threading.Event()
 
         self.transfer_thread = threading.Thread(target=self.transfer_manager_receive, daemon=True)
@@ -74,7 +74,6 @@ class Node:
         self.hardware_thread = threading.Thread(target=self.hardware_monitor, daemon=True)
         self.input_thread = threading.Thread(target=self.input_manager, daemon=True)
 
-        # start threads
         self.transfer_thread.start()
         self.worker_thread.start()
         self.state_thread.start()
@@ -86,8 +85,10 @@ class Node:
             self.hardware_thread.start()
             self.hardware_manager_started = True
 
+        # Wait for shutdown event (i.e. we have finished processing all jobs)
         self.shutdown_event.wait()
 
+        # Write results to file
         if not self.remote:
             self.processed_jobs.sort(key=lambda j: j.id)
             A = [x for job in self.processed_jobs for x in job.data]
@@ -108,45 +109,20 @@ class Node:
         all_jobs = [Job(i, i * SIZE_OF_JOB, A[i * SIZE_OF_JOB: i * SIZE_OF_JOB + SIZE_OF_JOB]) for i in
                     range(JOB_COUNT)]
 
+        # Delegate half the jobs to local machine
         self.job_queue = all_jobs[0: int(JOB_COUNT / 2)]
-        # delegate half the jobs to the other server
+
+        # Delegate half the jobs to remote server
         logging.info("Delegating {} jobs to remote server.".format(JOB_COUNT // 2))
         self.transfer_manager_send(all_jobs[int(JOB_COUNT / 2): JOB_COUNT])
 
     def worker_thread_manager(self):
-        '''
-        # Set the first cycle
-        self.throttle_lock.acquire()
-        sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
-        self.throttle_lock.release()
-        sleep.start()
-        '''
-
         # Loop to process jobs/sleep/wake
         while True:
-            # Throttling
-            '''
-            if self.worker_event.isSet():
-                # Set timer to clear event in the time we should sleep
-                self.throttle_lock.acquire()
-                wake = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.clear())
-                self.throttle_lock.release()
-
-                # Wait for the event to wake up
-                wake.start()
-                logging.debug("Worker thread going to sleep")
-                self.worker_event.wait()
-                logging.debug("Worker thread waking up")
-
-                # Set timer to sleep in the time we should throttle
-                self.throttle_lock.acquire()
-                sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.clear())
-                self.throttle_lock.release()
-                sleep.start()
-            '''
-
-            # Process a job
+            # Get time starting jobs
             start_time = time.time()
+
+            # Pop a job
             self.job_queue_lock.acquire()
             if len(self.job_queue) == 0:
                 self.job_queue_lock.release()
@@ -154,23 +130,32 @@ class Node:
             job = self.job_queue.pop()
             self.job_queue_lock.release()
 
+            # Process the job
             job.vector_add()
             logging.info("Processed job {}".format(job.id))
             self.processed_jobs_lock.acquire()
             self.processed_jobs.append(job)
             self.processed_jobs_lock.release()
+
+            # Get end time after completing job
             end_time = time.time()
+
+            # Sleep for time proportional to throttling value and job time
             self.throttle_lock.acquire()
             sleep_time = (100 - self.throttling) * (end_time - start_time) / self.throttling
             self.throttle_lock.release()
             time.sleep(sleep_time)
 
     def num_jobs_to_send(self):
+        # References to states of machines
         local_state = self.state()
         remote_state = self.remote_state
+
+        # If we don't know about the remote server, send nothing
         if remote_state is None:
-            # if no idea about the remote state, don't send anything
             return 0
+
+        # Calculate jobs to send using formula
         a = local_state.num_jobs
         b = local_state.cpu_use
         c = local_state.throttle_value
@@ -206,24 +191,31 @@ class Node:
     def state_manager_receive(self):
         while True:
             try:
+                # Receive remote state over network
                 BUFFER_SIZE = self.state_socket.recv(8)
                 pickled_data = recvall(self.state_socket, int.from_bytes(BUFFER_SIZE, byteorder='big'))
                 self.remote_state = pickle.loads(pickled_data)
                 if self.remote_state.shutdown:
                     self.shutdown_event.set()
             except EOFError:
+                # In case socket reads 0 bytes, pass
                 pass
 
     def state_manager_send(self):
+        # Serialize the state
         pickled_data = pickle.dumps(self.state())
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
+        # Send along socket
         self.state_socket.sendall(length)
         self.state_socket.sendall(pickled_data)
 
     def hardware_monitor(self):
+        # If shutdown event is set, return from thread
         if self.shutdown_event.isSet():
             return
+
+        # Get CPU use and call function again on a timer
         self.cpu_use = psutil.cpu_percent()
         timer = threading.Timer(1, self.hardware_monitor)
         self.adaptor()
@@ -252,21 +244,24 @@ class Node:
                     if not self.hardware_manager_started:
                         self.hardware_thread.start()
                         self.hardware_manager_started = True
-            except EOFError as e:
-                logging.error(str(e))
+            except EOFError:
+                # If socket reads 0 bytes continue
+                pass
 
     def transfer_manager_send(self, data):
         # turns data into byte stream and sends it to the server
         pickled_data = pickle.dumps(data)
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
+        # Send along socket
         self.transfer_socket.sendall(length)
         self.transfer_socket.sendall(pickled_data)
 
     def input_manager(self):
-        # prompts user to enter throttling value, if it is invalid they must try again
+        # Prompts user to enter throttling value, if it is invalid they must try again
         while 1:
             try:
+                # Ensure user enters a valid percentage
                 value = int(input("Enter a throttling value from 1 to 100: "))
                 if value < 1 or value > 100:
                     raise ValueError
@@ -279,10 +274,12 @@ class Node:
                 print("Value must be an integer between 1 and 100. Try again.")
 
     def state(self):
+        # Lock queue
         self.job_queue_lock.acquire()
         state = State(len(self.job_queue), self.throttling, self.cpu_use)
         self.job_queue_lock.release()
 
+        # If we have finished receiving and completing jobs on local
         self.processed_jobs_lock.acquire()
         if not self.remote and len(self.processed_jobs) == JOB_COUNT:
             state.shutdown = True
@@ -293,17 +290,22 @@ class Node:
 
 
 if __name__ == "__main__":
+    # Start unit as remote
     if argv[1] == "remote":
         logging.basicConfig(filename='logfile-remote.txt', level=logging.DEBUG,
                             format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
         logging.info("Starting as remote...")
         remote_node = Node(True)
         logging.info("Shutting down...")
+
+    # Start unit as local
     elif argv[1] == "local":
         logging.basicConfig(filename='logfile-local.txt', level=logging.DEBUG,
                             format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
         logging.info("Starting as local...")
         local_node = Node(False)
         logging.info("Shutting down...")
+
+    # Usage error
     else:
         print("Usage error.")
