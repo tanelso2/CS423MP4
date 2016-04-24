@@ -3,16 +3,28 @@ import pickle
 import threading
 import psutil
 import logging
+import operator
 from sys import argv
 from state import State
 from job import Job
+
 '''
 logging.basicConfig(filename='logfile.txt', level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
 '''
 
-TOTAL_ELEMENTS = 1024*1024*4
+TOTAL_ELEMENTS = 1024 * 1024 * 4
 JOB_COUNT = 512
 SIZE_OF_JOB = int(TOTAL_ELEMENTS / JOB_COUNT)
+
+
+def recvall(sock, n):
+    data = bytes()
+    while len(data) < n:
+        packet = sock.recv(n - len(data))
+        if not packet:
+            return None
+        data += packet
+    return data
 
 
 class Node:
@@ -24,6 +36,7 @@ class Node:
         self.cpu_use = 0.3
         # self.cpu_use = psutil.cpu_percent()
         self.remote_state = None
+        self.hardware_manager_started = False
 
         # Sockets
         self.transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -63,27 +76,31 @@ class Node:
         self.transfer_thread.start()
         self.worker_thread.start()
         self.state_thread.start()
-        self.hardware_thread.start()
         self.input_thread.start()
 
         # Initialize jobs
         if not self.remote:
             self.bootstrap()
+            self.hardware_thread.start()
+            self.hardware_manager_started = True
 
         self.shutdown_event.wait()
 
-        A = [x for job in self.processed_jobs.sort(key=id) for x in job.data]
-        with open('results.txt', 'w') as f:
-            f.write(A)
+        if not self.remote:
+            self.processed_jobs.sort(key=lambda j: j.id)
+            A = [x for job in self.processed_jobs for x in job.data]
+            with open('results.txt', 'w') as f:
+                f.write(str(A))
 
     def bootstrap(self):
         # initialize the vector
         A = [1.111111] * TOTAL_ELEMENTS
 
         # create jobs
-        all_jobs = [Job(i, i * SIZE_OF_JOB, A[i * SIZE_OF_JOB : i * SIZE_OF_JOB + SIZE_OF_JOB]) for i in range(JOB_COUNT)]
+        all_jobs = [Job(i, i * SIZE_OF_JOB, A[i * SIZE_OF_JOB: i * SIZE_OF_JOB + SIZE_OF_JOB]) for i in
+                    range(JOB_COUNT)]
 
-        self.job_queue = all_jobs[0 : int(JOB_COUNT / 2)]
+        self.job_queue = all_jobs[0: int(JOB_COUNT / 2)]
         # delegate half the jobs to the other server
         logging.info("Delegating {} jobs to remote server.".format(JOB_COUNT // 2))
         self.transfer_manager_send(all_jobs[int(JOB_COUNT / 2): JOB_COUNT])
@@ -91,7 +108,7 @@ class Node:
     def worker_thread_manager(self):
         # Set the first cycle
         self.throttle_lock.acquire()
-        sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
+        sleep = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.set())
         self.throttle_lock.release()
         sleep.start()
 
@@ -101,7 +118,7 @@ class Node:
             if self.worker_event.isSet():
                 # Set timer to clear event in the time we should sleep
                 self.throttle_lock.acquire()
-                wake = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.clear())
+                wake = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.clear())
                 self.throttle_lock.release()
 
                 # Wait for the event to wake up
@@ -110,7 +127,7 @@ class Node:
 
                 # Set timer to sleep in the time we should throttle
                 self.throttle_lock.acquire()
-                sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
+                sleep = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.set())
                 self.throttle_lock.release()
                 sleep.start()
 
@@ -134,7 +151,9 @@ class Node:
         if remote_state is None:
             # if no idea about the remote state, don't send anything
             return 0
-        return int((local_state.num_jobs * local_state.throttle_value * local_state.cpu_use - remote_state.num_jobs * remote_state.throttle_value * remote_state.cpu_use) / (local_state.throttle_value * local_state.cpu_use + remote_state.throttle_value * remote_state.cpu_use))
+        return int((
+                   local_state.num_jobs * local_state.throttle_value * local_state.cpu_use - remote_state.num_jobs * remote_state.throttle_value * remote_state.cpu_use) / (
+                   local_state.throttle_value * local_state.cpu_use + remote_state.throttle_value * remote_state.cpu_use))
 
     def adaptor(self):
         # Calculate ratio of loads
@@ -163,8 +182,7 @@ class Node:
         while True:
             try:
                 BUFFER_SIZE = self.state_socket.recv(8)
-                logging.debug("State recieving of length {}".format(int.from_bytes(BUFFER_SIZE, byteorder='big')))
-                pickled_data = self.state_socket.recv(int.from_bytes(BUFFER_SIZE, byteorder='big'))
+                pickled_data = recvall(self.state_socket, int.from_bytes(BUFFER_SIZE, byteorder='big'))
                 self.remote_state = pickle.loads(pickled_data)
                 if self.remote_state.shutdown:
                     self.shutdown_event.set()
@@ -176,11 +194,11 @@ class Node:
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
         self.state_socket.sendall(length)
-        length = len(pickled_data)
-        logging.debug("State sending of length {}".format(length))
         self.state_socket.sendall(pickled_data)
 
     def hardware_monitor(self):
+        if self.shutdown_event.isSet():
+            return
         logging.debug("Hardware monitor called")
         self.cpu_use = psutil.cpu_percent()
         timer = threading.Timer(1, self.hardware_monitor)
@@ -192,7 +210,8 @@ class Node:
             # turn the byte stream into a list of jobs
             try:
                 BUFFER_SIZE = self.transfer_socket.recv(8)
-                pickled_data = self.transfer_socket.recv(int.from_bytes(BUFFER_SIZE, byteorder='big'))
+                logging.debug("transfer manager recieved size {}".format(int.from_bytes(BUFFER_SIZE, byteorder='big')))
+                pickled_data = recvall(self.transfer_socket, int.from_bytes(BUFFER_SIZE, byteorder='big'))
                 jobs_recvd = pickle.loads(pickled_data)
 
                 # If the jobs are processed, put into finished jobs (local only)
@@ -204,10 +223,12 @@ class Node:
                 else:
                     # Otherwise we are receiving jobs to process
                     logging.info("Received {} jobs to process".format(len(jobs_recvd)))
-                    for job in jobs_recvd:
-                        self.job_queue_lock.acquire()
-                        self.job_queue.append(job)
-                        self.job_queue_lock.release()
+                    self.job_queue_lock.acquire()
+                    self.job_queue.extend(jobs_recvd)
+                    self.job_queue_lock.release()
+                    if not self.hardware_manager_started:
+                        self.hardware_thread.start()
+                        self.hardware_manager_started = True
             except EOFError as e:
                 logging.error(str(e))
 
@@ -216,6 +237,8 @@ class Node:
         pickled_data = pickle.dumps(data)
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
+        logging.debug("transfer manager sending size {}".format(len(pickled_data)))
+
         self.transfer_socket.sendall(length)
         self.transfer_socket.sendall(pickled_data)
 
@@ -223,10 +246,11 @@ class Node:
         # prompts user to enter throttling value, if it is invalid they must try again
         while 1:
             try:
-                value = int(input("Enter a throttling value from 0 to 100."))
+                value = int(input("Enter a throttling value from 0 to 100: "))
                 if value < 0 or value > 100:
                     raise ValueError
                 else:
+                    logging.info("Setting throttling to {}".format(value))
                     self.throttle_lock.acquire()
                     self.throttling = value
                     self.throttle_lock.release()
@@ -246,16 +270,19 @@ class Node:
 
         return state
 
+
 if __name__ == "__main__":
-	if argv[1] == "remote":
-		logging.basicConfig(filename='logfile-remote.txt', level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
-		logging.info("Starting as remote...")
-		remote_node = Node(True)
-		logging.info("Shutting down...")
-	elif argv[1] == "local":
-		logging.basicConfig(filename='logfile-local.txt', level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
-		logging.info("Starting as local...")
-		local_node = Node(False)
-		logging.info("Shutting down...")
-	else:
-		print("Usage error.")
+    if argv[1] == "remote":
+        logging.basicConfig(filename='logfile-remote.txt', level=logging.DEBUG,
+                            format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
+        logging.info("Starting as remote...")
+        remote_node = Node(True)
+        logging.info("Shutting down...")
+    elif argv[1] == "local":
+        logging.basicConfig(filename='logfile-local.txt', level=logging.DEBUG,
+                            format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
+        logging.info("Starting as local...")
+        local_node = Node(False)
+        logging.info("Shutting down...")
+    else:
+        print("Usage error.")

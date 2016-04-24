@@ -7,7 +7,7 @@ class Job:
 
     def vector_add(self):
         for i in range(len(self.data)):
-            for j in range(200):
+            for j in range(20):
                 self.data[i] += 1.111111
         self.complete = True
 
