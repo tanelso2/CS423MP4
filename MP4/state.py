@@ -3,3 +3,4 @@ class State:
         self.num_jobs = num_jobs
         self.throttle_value = throttle_value
         self.cpu_use = cpu_use
+        self.shutdown = False
