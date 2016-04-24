@@ -43,9 +43,9 @@ class Node:
         # Server / client server connections
         if self.remote:
             # this is the remote server so listen for connections
-            self.transfer_socket.bind(("localhost", 8040))
+            self.transfer_socket.bind(("", 8040))
             self.transfer_socket.listen(1)
-            self.state_socket.bind(("localhost", 8041))
+            self.state_socket.bind(("", 8041))
             self.state_socket.listen(1)
 
             # Accept connections
