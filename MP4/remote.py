@@ -3,7 +3,7 @@ import pickle
 import threading
 import psutil
 import logging
-import operator
+import time
 from sys import argv
 from state import State
 from job import Job
@@ -41,6 +41,8 @@ class Node:
         # Sockets
         self.transfer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.state_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.transfer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.state_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         if self.remote:
             # this is the remote server so listen for connections
@@ -92,6 +94,12 @@ class Node:
             with open('results.txt', 'w') as f:
                 f.write(str(A))
 
+    def __del__(self):
+        self.transfer_socket.shutdown(socket.SHUT_RDWR)
+        self.state_socket.shutdown(socket.SHUT_RDWR)
+        self.transfer_socket.close()
+        self.state_socket.close()
+
     def bootstrap(self):
         # initialize the vector
         A = [1.111111] * TOTAL_ELEMENTS
@@ -106,32 +114,39 @@ class Node:
         self.transfer_manager_send(all_jobs[int(JOB_COUNT / 2): JOB_COUNT])
 
     def worker_thread_manager(self):
+        '''
         # Set the first cycle
         self.throttle_lock.acquire()
-        sleep = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.set())
+        sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.set())
         self.throttle_lock.release()
         sleep.start()
+        '''
 
         # Loop to process jobs/sleep/wake
         while True:
             # Throttling
+            '''
             if self.worker_event.isSet():
                 # Set timer to clear event in the time we should sleep
                 self.throttle_lock.acquire()
-                wake = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.clear())
+                wake = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.clear())
                 self.throttle_lock.release()
 
                 # Wait for the event to wake up
                 wake.start()
+                logging.debug("Worker thread going to sleep")
                 self.worker_event.wait()
+                logging.debug("Worker thread waking up")
 
                 # Set timer to sleep in the time we should throttle
                 self.throttle_lock.acquire()
-                sleep = threading.Timer((100 - self.throttling) / 1000.0, lambda: self.worker_event.set())
+                sleep = threading.Timer(self.throttling / 1000.0, lambda: self.worker_event.clear())
                 self.throttle_lock.release()
                 sleep.start()
+            '''
 
             # Process a job
+            start_time = time.time()
             self.job_queue_lock.acquire()
             if len(self.job_queue) == 0:
                 self.job_queue_lock.release()
@@ -144,6 +159,11 @@ class Node:
             self.processed_jobs_lock.acquire()
             self.processed_jobs.append(job)
             self.processed_jobs_lock.release()
+            end_time = time.time()
+            self.throttle_lock.acquire()
+            sleep_time = (100 - self.throttling) * (end_time - start_time) / self.throttling
+            self.throttle_lock.release()
+            time.sleep(sleep_time)
 
     def num_jobs_to_send(self):
         local_state = self.state()
@@ -151,9 +171,14 @@ class Node:
         if remote_state is None:
             # if no idea about the remote state, don't send anything
             return 0
-        return int((
-                   local_state.num_jobs * local_state.throttle_value * local_state.cpu_use - remote_state.num_jobs * remote_state.throttle_value * remote_state.cpu_use) / (
-                   local_state.throttle_value * local_state.cpu_use + remote_state.throttle_value * remote_state.cpu_use))
+        a = local_state.num_jobs
+        b = local_state.cpu_use
+        c = local_state.throttle_value
+        d = remote_state.num_jobs
+        f = remote_state.cpu_use
+        g = remote_state.throttle_value
+        return int((a * b * g - c * d * f) // (b * g + c * f))
+
 
     def adaptor(self):
         # Calculate ratio of loads
@@ -186,8 +211,8 @@ class Node:
                 self.remote_state = pickle.loads(pickled_data)
                 if self.remote_state.shutdown:
                     self.shutdown_event.set()
-            except EOFError as e:
-                logging.error(str(e))
+            except EOFError:
+                pass
 
     def state_manager_send(self):
         pickled_data = pickle.dumps(self.state())
@@ -199,7 +224,6 @@ class Node:
     def hardware_monitor(self):
         if self.shutdown_event.isSet():
             return
-        logging.debug("Hardware monitor called")
         self.cpu_use = psutil.cpu_percent()
         timer = threading.Timer(1, self.hardware_monitor)
         self.adaptor()
@@ -210,7 +234,6 @@ class Node:
             # turn the byte stream into a list of jobs
             try:
                 BUFFER_SIZE = self.transfer_socket.recv(8)
-                logging.debug("transfer manager recieved size {}".format(int.from_bytes(BUFFER_SIZE, byteorder='big')))
                 pickled_data = recvall(self.transfer_socket, int.from_bytes(BUFFER_SIZE, byteorder='big'))
                 jobs_recvd = pickle.loads(pickled_data)
 
@@ -237,8 +260,6 @@ class Node:
         pickled_data = pickle.dumps(data)
         length = len(pickled_data).to_bytes(8, byteorder='big')
 
-        logging.debug("transfer manager sending size {}".format(len(pickled_data)))
-
         self.transfer_socket.sendall(length)
         self.transfer_socket.sendall(pickled_data)
 
@@ -246,8 +267,8 @@ class Node:
         # prompts user to enter throttling value, if it is invalid they must try again
         while 1:
             try:
-                value = int(input("Enter a throttling value from 0 to 100: "))
-                if value < 0 or value > 100:
+                value = int(input("Enter a throttling value from 1 to 100: "))
+                if value < 1 or value > 100:
                     raise ValueError
                 else:
                     logging.info("Setting throttling to {}".format(value))
@@ -255,7 +276,7 @@ class Node:
                     self.throttling = value
                     self.throttle_lock.release()
             except ValueError:
-                print("Value must be an integer between 0 and 100. Try again.")
+                print("Value must be an integer between 1 and 100. Try again.")
 
     def state(self):
         self.job_queue_lock.acquire()
@@ -274,13 +295,13 @@ class Node:
 if __name__ == "__main__":
     if argv[1] == "remote":
         logging.basicConfig(filename='logfile-remote.txt', level=logging.DEBUG,
-                            format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
+                            format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
         logging.info("Starting as remote...")
         remote_node = Node(True)
         logging.info("Shutting down...")
     elif argv[1] == "local":
         logging.basicConfig(filename='logfile-local.txt', level=logging.DEBUG,
-                            format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
+                            format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s', datefmt='%Y-%M-%d %H:%M:%S')
         logging.info("Starting as local...")
         local_node = Node(False)
         logging.info("Shutting down...")
